@@ -1,0 +1,20 @@
+name: CNN
+channels:
+  - pytorch
+  - anaconda
+  - conda-forge
+  - defaults
+dependencies:
+  - cudatoolkit=11.6.0=hecad31d_10
+  - numpy=1.23.5=py38h14f4228_0
+  - pillow=8.2.0=py38ha0e1e83_1
+  - python=3.8.16=h7a1cb2a_2
+  - pytorch=1.12.1=py3.8_cuda11.6_cudnn8.3.2_0
+  - torchaudio=0.12.1=py38_cu116
+  - torchvision=0.13.1=py38_cu116
+  - typing_extensions=4.4.0=pyha770c72_0
+  - pip:
+    - opencv-python==4.7.0.72
+    - timm==0.6.12
+    - tqdm==4.64.1
+    - transformers==4.27.4
