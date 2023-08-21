@@ -2,8 +2,8 @@ import os
 import json
 from collections import OrderedDict
 import torch
-from cn_clip.clip.configuration_bert import BertConfig
-from cn_clip.clip.modeling_bert import BertModel
+# from cn_clip.clip.configuration_bert import BertConfig
+# from cn_clip.clip.modeling_bert import BertModel
 from typing import Union, List
 from PIL import Image
 from torch import nn
@@ -213,52 +213,52 @@ def save_model(model, save_directory):
     torch.save(state_dict, os.path.join(save_directory, WEIGHT_NAME))
 
 
-def load_config(from_pretrained):
-    with open(os.path.join(from_pretrained, CONFIG_NAME), 'r', encoding='utf-8') as f:
-        config = json.load(f)
+# def load_config(from_pretrained):
+#     with open(os.path.join(from_pretrained, CONFIG_NAME), 'r', encoding='utf-8') as f:
+#         config = json.load(f)
 
-    bert_config = BertConfig(
-        vocab_size_or_config_json_file=config["vocab_size"],
-        hidden_size=config["hidden_size"],
-        num_hidden_layers=config["num_hidden_layers"],
-        num_attention_heads=config["num_attention_heads"],
-        intermediate_size=config["intermediate_size"],
-        hidden_act=config["hidden_act"],
-        hidden_dropout_prob=config["hidden_dropout_prob"],
-        attention_probs_dropout_prob=config["attention_probs_dropout_prob"],
-        max_position_embeddings=config["max_position_embeddings"],
-        type_vocab_size=config["type_vocab_size"],
-        initializer_range=config["initializer_range"],
-        layer_norm_eps=1e-12,
-    )
-    return bert_config
+#     bert_config = BertConfig(
+#         vocab_size_or_config_json_file=config["vocab_size"],
+#         hidden_size=config["hidden_size"],
+#         num_hidden_layers=config["num_hidden_layers"],
+#         num_attention_heads=config["num_attention_heads"],
+#         intermediate_size=config["intermediate_size"],
+#         hidden_act=config["hidden_act"],
+#         hidden_dropout_prob=config["hidden_dropout_prob"],
+#         attention_probs_dropout_prob=config["attention_probs_dropout_prob"],
+#         max_position_embeddings=config["max_position_embeddings"],
+#         type_vocab_size=config["type_vocab_size"],
+#         initializer_range=config["initializer_range"],
+#         layer_norm_eps=1e-12,
+#     )
+#     return bert_config
 
 
-def load_clip(from_pretrained, bert_config, use_fp16=False):
-    # bert_config = load_config(from_pretrained)
-    bert_model = BertModel(bert_config)
+# def load_clip(from_pretrained, bert_config, use_fp16=False):
+#     # bert_config = load_config(from_pretrained)
+#     bert_model = BertModel(bert_config)
     
-    with open(os.path.join(from_pretrained, WEIGHT_NAME), 'rb') as opened_file:
-        # loading saved checkpoint
-        checkpoint = torch.load(opened_file, map_location="cpu")
-    if "state_dict" in checkpoint:
-        sd = checkpoint["state_dict"]
-    else:
-        sd = checkpoint
-    if next(iter(sd.items()))[0].startswith('module'):
-        sd = {k[len('module.'):]: v for k, v in sd.items() if "bert.pooler" not in k}
-    new_sd = OrderedDict()
-    for key in sd:
-        if key.startswith('bert'):
-            new_sd[key[len('bert.'):]] = sd[key]
-    if not new_sd:
-        new_sd = sd
-    print("load clip model ckpt from {}".format(os.path.join(from_pretrained, WEIGHT_NAME)))
-    bert_model.load_state_dict(new_sd, strict=True)
-    # bert_model = bert_model.to(device)
-    if use_fp16:
-        bert_model = bert_model.half()
-    return bert_model
+#     with open(os.path.join(from_pretrained, WEIGHT_NAME), 'rb') as opened_file:
+#         # loading saved checkpoint
+#         checkpoint = torch.load(opened_file, map_location="cpu")
+#     if "state_dict" in checkpoint:
+#         sd = checkpoint["state_dict"]
+#     else:
+#         sd = checkpoint
+#     if next(iter(sd.items()))[0].startswith('module'):
+#         sd = {k[len('module.'):]: v for k, v in sd.items() if "bert.pooler" not in k}
+#     new_sd = OrderedDict()
+#     for key in sd:
+#         if key.startswith('bert'):
+#             new_sd[key[len('bert.'):]] = sd[key]
+#     if not new_sd:
+#         new_sd = sd
+#     print("load clip model ckpt from {}".format(os.path.join(from_pretrained, WEIGHT_NAME)))
+#     bert_model.load_state_dict(new_sd, strict=True)
+#     # bert_model = bert_model.to(device)
+#     if use_fp16:
+#         bert_model = bert_model.half()
+#     return bert_model
 
 
 def tokenize(tokenizer, texts: Union[str, List[str]], context_length: int = 64) -> torch.LongTensor:

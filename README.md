@@ -2,12 +2,12 @@
 [[Paper](https://arxiv.org/abs/2305.13921)]
 
 # Requirements
-A suitable [conda](https://conda.io/) environment named `amc` can be created
+A suitable [conda](https://conda.io/) environment named `AMC` can be created
 and activated with:
 
 ```
 conda env create -f environment.yaml
-conda activate amc
+conda activate AMC
 ```
 
 # Data Prepearing

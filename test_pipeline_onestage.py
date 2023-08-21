@@ -13,7 +13,7 @@ from tqdm.auto import tqdm
 from diffusers import AutoencoderKL, UNet2DConditionModel, PNDMScheduler
 from transformers import CLIPTokenizer, CLIPTextModel
 
-from utils import numpy_to_pil
+from utils.utils import numpy_to_pil
 from boxnet_models import build_model, add_boxnet_args
 from utils.box_ops import box_cxcywh_to_xyxy
 from p2p import AttentionStore, show_cross_attention, EmptyControl
@@ -57,39 +57,43 @@ def save_input_hook(self, inp, out):
 
 
 def build_normal(u_x, u_y, d_x, d_y, step, device):
-    x, y = torch.meshgrid(torch.linspace(0, 1, step),
-                          torch.linspace(0, 1, step))
+    x, y = torch.meshgrid(torch.linspace(0,1,step), torch.linspace(0,1,step))
     x = x.to(device)
     y = y.to(device)
-    out_prob = (1/2/torch.pi/d_x/d_y)*torch.exp(-1/2 *
-                                                (torch.square((x-u_x)/d_x)+torch.square((y-u_y)/d_y)))
+    out_prob = (1/2/torch.pi/d_x/d_y)*torch.exp(-1/2*(torch.square((x-u_x)/d_x)+torch.square((y-u_y)/d_y)))
     return out_prob
-
 
 def uniq_masks(all_masks, zero_masks=None, scale=1.0):
     uniq_masks = torch.stack(all_masks)
     # num = all_masks.shape[0]
     uniq_mask = torch.argmax(uniq_masks, dim=0)
     if zero_masks is None:
-        all_masks = [((uniq_mask == i)*mask*scale).float().clamp(0, 1.0)
-                     for i, mask in enumerate(all_masks)]
+        all_masks = [((uniq_mask==i)*mask*scale).float().clamp(0, 1.0) for i, mask in enumerate(all_masks)]
     else:
-        all_masks = [((uniq_mask == i)*mask*scale).float().clamp(0, 1.0)
-                     for i, mask in enumerate(zero_masks)]
+        all_masks = [((uniq_mask==i)*mask*scale).float().clamp(0, 1.0) for i, mask in enumerate(zero_masks)]
 
     return all_masks
 
+def save_img_with_box(img, bboxes, device=torch.device("cuda")):
+    W, H = img.size
+    scale_fct = torch.tensor([W, H, W, H]).to(device)
+    bboxes = bboxes * scale_fct
+    colors = ['red', 'green']
+    draw = ImageDraw.Draw(img)
+    for n, b in enumerate(bboxes):
+        draw.rectangle(((b[0], b[1]),(b[2], b[3])), fill=None, outline=colors[n], width=5)
+    # save_colored_mask(os.path.join(colored_res_path, name), attn_img)
+    return img
 
-def build_masks(bboxes, size, mask_mode="gaussin_zero_one", focus_rate=1.5):
+
+def build_masks(bboxes, size, mask_mode="gaussin_zero_one", focus_rate=1.0):
     all_masks = []
     zero_masks = []
     for bbox in bboxes:
-        x0, y0, x1, y1 = bbox
-        mask = build_normal((y0+y1)/2, (x0+x1)/2, (y1-y0) /
-                            4, (x1-x0)/4, size, bbox.device)
+        x0,y0,x1,y1 = bbox
+        mask = build_normal((y0+y1)/2, (x0+x1)/2, (y1-y0)/4, (x1-x0)/4, size, bbox.device)
         zero_mask = torch.zeros_like(mask)
-        zero_mask[int(y0 * size):min(int(y1 * size)+1, size),
-                  int(x0 * size):min(int(x1 * size)+1, size)] = 1.0
+        zero_mask[int(y0 * size):min(int(y1 * size)+1, size), int(x0 * size):min(int(x1 * size)+1, size)] = 1.0
         zero_masks.append(zero_mask)
         all_masks.append(mask)
     if mask_mode == 'zero_one':
@@ -104,110 +108,123 @@ def build_masks(bboxes, size, mask_mode="gaussin_zero_one", focus_rate=1.5):
         raise ValueError("Not supported mask_mode.")
 
 
-def register_attention_control(model, controller, bboxes, entity_indexes, mask_control, mask_self=True, mask_mode='gaussin_zero_one', soft_mask_rate=0.5, focus_rate=1.5):
-    def ca_forward(self, place_in_unet):
+class BboxCrossAttnProcessor:
 
-        def forward(hidden_states, context=None, mask=None):
-            batch_size, sequence_length, channel = hidden_states.shape
+    def __init__(self, attnstore, place_in_unet, bboxes, entity_indexes, mask_control, mask_self, with_uncond, mask_mode, soft_mask_rate, focus_rate):
+        super().__init__()
+        self.attnstore = attnstore
+        self.place_in_unet = place_in_unet
+        self.bboxes = bboxes
+        self.entity_indexes = entity_indexes
+        self.mask_control = mask_control
+        self.mask_self = mask_self
+        self.with_uncond = with_uncond
+        self.mask_mode = mask_mode
+        self.soft_mask_rate = soft_mask_rate
+        self.focus_rate = focus_rate
 
-            query = self.to_q(hidden_states)
-            # context = context if context is not None else hidden_states
-            is_cross = context is not None
-            context = context if is_cross else hidden_states
-            key = self.to_k(context)
-            value = self.to_v(context)
+    def __call__(self, attn, hidden_states, encoder_hidden_states=None, attention_mask=None):
+        batch_size, sequence_length, _ = hidden_states.shape
+        attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length)
 
-            dim = query.shape[-1]
+        query = attn.to_q(hidden_states)
 
-            query = self.reshape_heads_to_batch_dim(query)
-            key = self.reshape_heads_to_batch_dim(key)
-            value = self.reshape_heads_to_batch_dim(value)
+        is_cross = encoder_hidden_states is not None
+        encoder_hidden_states = encoder_hidden_states if encoder_hidden_states is not None else hidden_states
+        key = attn.to_k(encoder_hidden_states)
+        value = attn.to_v(encoder_hidden_states)
 
-            attention_scores = torch.baddbmm(
-                torch.empty(query.shape[0], query.shape[1], key.shape[1],
-                            dtype=query.dtype, device=query.device),
-                query,
-                key.transpose(-1, -2),
-                beta=0,
-                alpha=self.scale,
-            )
-            attention_probs = attention_scores.softmax(dim=-1)
+        query = attn.head_to_batch_dim(query)
+        key = attn.head_to_batch_dim(key)
+        value = attn.head_to_batch_dim(value)
 
-            if mask_control:
-                if is_cross:
-                    size = int(np.sqrt(sequence_length))
-                    all_masks = build_masks(
-                        bboxes, size, mask_mode=mask_mode, focus_rate=focus_rate)
-                    for pos, mask in zip(entity_indexes, all_masks):
-                        start = pos[0]
-                        end = pos[-1]
-                        if mask.sum() <= 0:  # sequence_length *  0.004:
-                            continue
-                        mask = mask.reshape(
-                            (sequence_length, -1)).to(hidden_states.device)
-                        mask = mask.expand(-1, (end-start+1))
-                        cond_attention_probs[:, :, start+1:end +
-                                             2] = cond_attention_probs[:, :, start+1:end+2] * mask
-                elif mask_self:
-                    size = int(np.sqrt(sequence_length))
-                    # must be 1/0
-                    all_masks = build_masks(
-                        bboxes, size, mask_mode=mask_mode, focus_rate=focus_rate)
-                    for img_mask in all_masks:
-                        if img_mask.sum() <= 0:
-                            continue
-                        img_mask = img_mask.reshape(sequence_length)
-                        mask_index = img_mask.nonzero().squeeze(-1)
-                        mask = torch.ones(sequence_length, sequence_length).to(
-                            hidden_states.device)
+        attention_probs = attn.get_attention_scores(query, key, attention_mask)
 
-                        mask[:, mask_index] = mask[:, mask_index] * \
-                            img_mask.unsqueeze(-1)
-                        cond_attention_probs = cond_attention_probs * mask + \
-                            cond_attention_probs * (1-mask) * soft_mask_rate
+        if self.with_uncond:
+            cond_attention_probs = attention_probs[batch_size//2:]
+        else:
+            cond_attention_probs = attention_probs
 
-            # # compute attention output
-            attention_probs = controller(
-                attention_probs, is_cross, place_in_unet)
+        if self.mask_control:
+            
+            if is_cross:
+                size = int(np.sqrt(sequence_length))
+                all_masks = build_masks(self.bboxes, size, mask_mode=self.mask_mode, focus_rate=self.focus_rate)
+                for pos, mask in zip(self.entity_indexes, all_masks):
+                    start = pos[0]
+                    end = pos[-1]
+                    if mask.sum() <= 0:  # sequence_length *  0.004:
+                        continue
+                    mask = mask.reshape((sequence_length, -1)).to(hidden_states.device)
+                    mask = mask.expand(-1, (end-start+1))
+                    cond_attention_probs[:, :, start+1:end+2] = cond_attention_probs[:, :, start+1:end+2] * mask
+            elif self.mask_self:
+                size = int(np.sqrt(sequence_length))
+                # must be 1/0
+                all_masks = build_masks(self.bboxes, size, mask_mode=self.mask_mode, focus_rate=self.focus_rate)
+                for img_mask in all_masks:
+                    if img_mask.sum() <= 0:  # sequence_length *  0.004:
+                        continue
+                    img_mask = img_mask.reshape(sequence_length)
+                    mask_index = img_mask.nonzero().squeeze(-1)
+                    mask = torch.ones(sequence_length, sequence_length).to(hidden_states.device)
 
-            hidden_states = torch.bmm(attention_probs, value)
+                    mask[:, mask_index] = mask[:, mask_index] * img_mask.unsqueeze(-1)
+                    cond_attention_probs = cond_attention_probs * mask + cond_attention_probs * (1-mask) * self.soft_mask_rate
+            if self.with_uncond:
+                attention_probs[batch_size//2:] = cond_attention_probs
+            else:
+                attention_probs = cond_attention_probs
 
-            # reshape hidden_states
-            hidden_states = self.reshape_batch_dim_to_heads(hidden_states)
+        self.attnstore(cond_attention_probs, is_cross, self.place_in_unet)
 
-            # linear proj
-            hidden_states = self.to_out[0](hidden_states)
-            # dropout
-            hidden_states = self.to_out[1](hidden_states)
-            return hidden_states
+        hidden_states = torch.bmm(attention_probs, value)
+        hidden_states = attn.batch_to_head_dim(hidden_states)
 
-        return forward
+        # linear proj
+        hidden_states = attn.to_out[0](hidden_states)
+        # dropout
+        hidden_states = attn.to_out[1](hidden_states)
 
-    def register_recr(net_, count, place_in_unet):
-        if net_.__class__.__name__ == 'CrossAttention':
-            net_.forward = ca_forward(net_, place_in_unet)
-            return count + 1
-        elif hasattr(net_, 'children'):
-            for name, net__ in net_.named_children():
-                if 'fuser' not in name:
-                    count = register_recr(net__, count, place_in_unet)
-        return count
+        return hidden_states
 
+
+
+def register_attention_control_bbox(model, controller, bboxes, entity_indexes, mask_control=False, mask_self=False, 
+                                    with_uncond=False, mask_mode='gaussin_zero_one', soft_mask_rate=0.2, focus_rate=1.0):
+
+    attn_procs = {}
     cross_att_count = 0
-    sub_nets = model.named_children()
-    for net in sub_nets:
-        if "down" in net[0]:
-            cross_att_count += register_recr(net[1], 0, "down")
-        elif "up" in net[0]:
-            cross_att_count += register_recr(net[1], 0, "up")
-        elif "mid" in net[0]:
-            cross_att_count += register_recr(net[1], 0, "mid")
+    for name in model.unet.attn_processors.keys():
+        cross_attention_dim = None if name.endswith("attn1.processor") else model.unet.config.cross_attention_dim
+        if name.startswith("mid_block"):
+            hidden_size = model.unet.config.block_out_channels[-1]
+            place_in_unet = "mid"
+        elif name.startswith("up_blocks"):
+            block_id = int(name[len("up_blocks.")])
+            hidden_size = list(reversed(model.unet.config.block_out_channels))[block_id]
+            place_in_unet = "up"
+        elif name.startswith("down_blocks"):
+            block_id = int(name[len("down_blocks.")])
+            hidden_size = model.unet.config.block_out_channels[block_id]
+            place_in_unet = "down"
+        else:
+            continue
+
+        cross_att_count += 1
+        attn_procs[name] = BboxCrossAttnProcessor(
+            attnstore=controller, place_in_unet=place_in_unet, bboxes=bboxes, entity_indexes=entity_indexes, 
+            mask_control=mask_control, mask_self=mask_self, with_uncond=with_uncond, mask_mode=mask_mode,
+            soft_mask_rate=soft_mask_rate, focus_rate=focus_rate
+        )
+
+    model.unet.set_attn_processor(attn_procs)
     controller.num_att_layers = cross_att_count
 
 
 class StableDiffusionTest():
 
-    def __init__(self, model_path, device, boxnet_path=None):
+    def __init__(self, model_path, device, args, boxnet_path=None):
         super().__init__()
         self.tokenizer = CLIPTokenizer.from_pretrained(
             model_path, subfolder="tokenizer")
@@ -221,9 +238,9 @@ class StableDiffusionTest():
             model_path, subfolder="scheduler")
 
         if boxnet_path is not None:
-            args_parser = argparse.ArgumentParser()
-            args_parser = add_boxnet_args(args_parser)
-            args = args_parser.parse_args()
+            # args_parser = argparse.ArgumentParser()
+            # args_parser = add_boxnet_args(args_parser)
+            # args = args_parser.parse_args()
             args.no_class = True
             self.boxnet, _, _ = build_model(args)
             self.boxnet.load_state_dict(torch.load(boxnet_path))
@@ -323,7 +340,7 @@ class StableDiffusionTest():
     def log_imgs(
         self,
         device,
-        inputs,
+        data,
         height: Optional[int] = 512,
         width: Optional[int] = 512,
         num_inference_steps: int = 50,
@@ -337,32 +354,38 @@ class StableDiffusionTest():
         mask_control=False,
         mask_self=True,
         mask_mode='gaussin_zero_one',
-        soft_mask_rate=0.5,
-        focus_rate=1.5,
+        soft_mask_rate=0.2,
+        focus_rate=1.0,
         **kwargs
     ):
-        self.boxnet.eval()
+        # self.boxnet.eval()
+        feature_blocks = []
+        for idx, block in enumerate(self.unet.down_blocks):
+            if idx in blocks:
+                block.register_forward_hook(save_out_hook)
+                feature_blocks.append(block) 
+                
+        for idx, block in enumerate(self.unet.up_blocks):
+            if idx in blocks:
+                block.register_forward_hook(save_out_hook)
+                feature_blocks.append(block)  
 
         prompt = []
         cat_embeddings = []
-        box_nums = []
-        entities = []
-        for data in inputs:
-            prompt.append(data["prompt"])
-            cat_input_id = self.tokenizer(
-                data["phrases"],
-                padding="max_length",
-                max_length=self.tokenizer.model_max_length,
-                truncation=True,
-                return_tensors="pt",
-            ).input_ids.to(device)
-            tmp_embed = self.text_encoder(cat_input_id)[1]
-            cat_embed = torch.zeros(30, 768).to(device)
-            cat_embed[:len(data["phrases"])] = tmp_embed
-            cat_embeddings.append(cat_embed)
-            box_nums.append(len(data["phrases"]))
-            entities.append(data["entities"])
-        cat_embeddings = torch.stack(cat_embeddings)
+        prompt.append(data["prompt"])
+        cat_input_id = self.tokenizer(
+            data["phrases"],
+            padding="max_length",
+            max_length=self.tokenizer.model_max_length,
+            truncation=True,
+            return_tensors="pt",
+        ).input_ids.to(device)
+        tmp_embed = self.text_encoder(cat_input_id)[1]
+        cat_embed = torch.zeros(30, 768).to(device)
+        cat_embed[:len(data["phrases"])] = tmp_embed
+        cat_embeddings = cat_embed.unsqueeze(0)
+        box_num = len(data["phrases"])
+        entities = data["entities"]
 
         batch_size = 1 if isinstance(prompt, str) else len(prompt)
         do_classifier_free_guidance = guidance_scale > 1.0
@@ -376,7 +399,7 @@ class StableDiffusionTest():
 
         if latents is None:
             shape = (batch_size * num_images_per_prompt,
-                     self.unet_stable.in_channels, height // 8, width // 8)
+                     self.unet.in_channels, height // 8, width // 8)
             latents = torch.randn(shape, generator=generator,
                                   device=device, dtype=text_embeddings.dtype)
         else:
@@ -388,71 +411,52 @@ class StableDiffusionTest():
 
         all_boxes = []
         for i, t in enumerate(tqdm(timesteps)):
-            # if i >= sample_step:
-            #     break
+            if controller is not None:
+                register_attention_control_bbox(self, controller, None, None, False, False, False, mask_mode)
+
+            # predict the noise residual
+            noise_pred_text = self.unet(latents, t,
+                                   encoder_hidden_states=text_embeddings[1].unsqueeze(0)).sample
+
+            ################################################################
+            activations = []
+            for block in feature_blocks:
+                activations.append(block.activations)
+                block.activations = None
+
+            activations = [activations[0][0], activations[1][0], activations[2][0], activations[3][0], activations[4], activations[5], activations[6], activations[7]]
+
+            assert all([isinstance(acts, torch.Tensor) for acts in activations])
+            size = latents.shape[2:]
+            resized_activations = []
+            for acts in activations:
+                acts = torch.nn.functional.interpolate(
+                    acts, size=size, mode="bilinear"
+                )
+                resized_activations.append(acts)
+            
+            features =  torch.cat(resized_activations, dim=1)
+
+            sqrt_one_minus_alpha_prod = (1 - self.test_scheduler.alphas_cumprod[t]).to(device) ** 0.5
+            sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.flatten()
+            while len(sqrt_one_minus_alpha_prod.shape) < len(noise_pred_text.shape):
+                sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.unsqueeze(-1)
+            noise_level = sqrt_one_minus_alpha_prod * noise_pred_text
+            outputs = self.boxnet(features, noise_level, queries=cat_embeddings) 
+            out_bbox = outputs['pred_boxes']
+            boxes = box_cxcywh_to_xyxy(out_bbox)
+            boxes = boxes[0][:box_num]
+            
             # expand the latents if we are doing classifier free guidance
             latent_model_input = torch.cat(
                 [latents] * 2) if do_classifier_free_guidance else latents
             latent_model_input = self.test_scheduler.scale_model_input(
                 latent_model_input, t)
-
+            
             if controller is not None:
-                register_attention_control(
-                    self.unet, EmptyControl(), None, None, False)
+                register_attention_control_bbox(self, controller, boxes, entities, mask_control=mask_control, mask_self=mask_self, 
+                                                with_uncond=True, mask_mode=mask_mode, soft_mask_rate=soft_mask_rate, focus_rate=focus_rate)
 
-            # predict the noise residual
-            noise_pred = self.unet(latent_model_input, t,
-                                   encoder_hidden_states=text_embeddings).sample
-
-            if do_classifier_free_guidance:
-                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                noise_pred = noise_pred_uncond + guidance_scale * \
-                    (noise_pred_text - noise_pred_uncond)
-
-            ################################################################
-            activations = []
-            for block in self.feature_blocks:
-                activations.append(block.activations)
-                block.activations = None
-
-            activations = [activations[0][0], activations[1][0], activations[2][0],
-                           activations[3][0], activations[4], activations[5], activations[6], activations[7]]
-
-            assert all([isinstance(acts, torch.Tensor)
-                       for acts in activations])
-            size = latents.shape[2:]
-            resized_activations = []
-            for acts in activations:
-                acts = nn.functional.interpolate(
-                    acts, size=size, mode="bilinear"
-                )
-                _, acts = acts.chunk(2)
-                # acts = acts.transpose(1,3)
-                resized_activations.append(acts)
-
-            features = torch.cat(resized_activations, dim=1)
-
-            sqrt_one_minus_alpha_prod = (
-                1 - self.test_scheduler.alphas_cumprod[t]).to(device) ** 0.5
-            sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.flatten()
-            while len(sqrt_one_minus_alpha_prod.shape) < len(noise_pred.shape):
-                sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.unsqueeze(
-                    -1)
-            noise_level = sqrt_one_minus_alpha_prod * noise_pred
-            # noise_level = noise_level.transpose(1,3)
-
-            # if i == sample_step:
-            # .unflatten(0, (81, 64, 64)).transpose(3, 1)
-            outputs = self.boxnet(features, noise_level,
-                                  queries=cat_embeddings)
-            out_bbox = outputs['pred_boxes']
-            boxes = box_cxcywh_to_xyxy(out_bbox)
-            new_boxes = boxes[0][:box_nums[0]]
-            all_boxes.append(new_boxes)
-
-            if controller is not None:
-                register_attention_control(
-                    self.unet, controller, boxes, entities, mask_control, mask_self=mask_self, mask_mode=mask_mode, soft_mask_rate=soft_mask_rate, focus_rate=focus_rate)
             noise_pred = self.unet(latent_model_input, t,
                                    encoder_hidden_states=text_embeddings).sample
             # perform guidance
@@ -466,7 +470,6 @@ class StableDiffusionTest():
             # compute the previous noisy sample x_t -> x_t-1
             latents = self.test_scheduler.step(
                 noise_pred, t, latents, **extra_step_kwargs).prev_sample
-            # break
 
         latents = 1 / 0.18215 * latents
         image = self.vae.decode(latents).sample
@@ -513,14 +516,15 @@ if __name__ == "__main__":
                         type=str, help="BoxNet model path.")
     parser.add_argument('--output_dir', required=True, type=str,
                         help="Output dir for results.")
-    parser.add_argument('--seed', default=1234, type=int,
+    parser.add_argument('--seed', default=30850, type=int,
                         help="Random seed.")
     parser.add_argument('--mask_mode', default='gaussin_zero_one', type=str, choices=['gaussin_zero_one', 'zero_one'],
                         help="mask mode.")
-    parser.add_argument('--soft_mask_rate', default=0.5, type=float,
+    parser.add_argument('--soft_mask_rate', default=0.2, type=float,
                         help="Soft mask rate for self mask.")
-    parser.add_argument('--focus_rate', default=1.5, type=int,
+    parser.add_argument('--focus_rate', default=1.0, type=int,
                         help="Focus rate on area in-box")
+    parser = add_boxnet_args(parser)
     args = parser.parse_args()
 
     device = torch.device("cuda")
@@ -530,28 +534,28 @@ if __name__ == "__main__":
     boxnet_path = args.boxnet_model_path
     save_path = args.output_dir
     os.makedirs(save_path, exist_ok=True)
-
-    amc_test = StableDiffusionTest(model_path, device, boxnet_path=boxnet_path)
-    g_cpu = torch.Generator().manual_seed(args.seed)
+    mask_self=True
+    amc_test = StableDiffusionTest(model_path, device, args, boxnet_path=boxnet_path)
+    generator = torch.Generator(device=device).manual_seed(args.seed)
 
     for i, cur_input in enumerate(inputs):
         print(inputs[i]['prompt'])
         cur_input['bboxes'] = None
         cur_path = os.path.join(save_path, "{}".format(i))
         os.makedirs(cur_path, exist_ok=True)
-        controller = AttentionStore()
-        images, all_step_bboxes, attn_img = amc_test.log_imgs(
-            device, [cur_input], num_images_per_prompt=1, generator=g_cpu, controller=controller, mask_control=False, 
-            mask_mode=args.mask_mode, soft_mask_rate=args.soft_mask_rate, focus_rate=args.focus_rate)
+        # controller = AttentionStore()
+        # images, all_step_bboxes, attn_img = amc_test.log_imgs(
+        #     device, cur_input, num_images_per_prompt=1, generator=generator, controller=controller, mask_control=False, mask_self=mask_self,
+        #     mask_mode=args.mask_mode, soft_mask_rate=args.soft_mask_rate, focus_rate=args.focus_rate)
 
-        images[0].save(os.path.join(cur_path, f"result.jpg"))
-        for k, bboxes in enumerate(all_step_bboxes):
-            save_bbox_img(cur_path, bboxes, name=f"bbox_{k}.png")
-            # print(bboxes)
-        attn_img.save(os.path.join(cur_path, f"attn.jpg"))
+        # images[0].save(os.path.join(cur_path, f"result.jpg"))
+        # for k, bboxes in enumerate(all_step_bboxes):
+        #     save_bbox_img(cur_path, bboxes, name=f"bbox_{k}.png")
+        #     # print(bboxes)
+        # attn_img.save(os.path.join(cur_path, f"attn.jpg"))
         controller = AttentionStore()
         images, all_step_bboxes, attn_img = amc_test.log_imgs(
-            device, [cur_input], num_images_per_prompt=1, generator=g_cpu, controller=controller, mask_control=True, 
+            device, cur_input, num_images_per_prompt=1, generator=generator, controller=controller, mask_control=True, mask_self=mask_self,
             mask_mode=args.mask_mode, soft_mask_rate=args.soft_mask_rate, focus_rate=args.focus_rate)
 
         images[0].save(os.path.join(cur_path, f"masked_result.jpg"))

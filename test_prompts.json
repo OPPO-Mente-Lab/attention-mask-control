@@ -1,20 +1,19 @@
 [
     {
-        "prompt": "An elephant is standing next to a dog.",
-        "phrases": ["an elephant", "a dog"],
-        "bboxes": [ [0.328125,0.25,0.984375,0.984375], [0.34375,0.890625,0.640625,0.984375] ],
-        "entities": [[0, 2], [6,8]]
-    },
-    {
-        "prompt": "a red teddy bear sitting next to a black bird",
-        "phrases": ["a red teddy bear", "a black bird"],
-        "bboxes": [ [0.0,0.09,0.33,0.76], [0.55,0.11,1.0,0.8] ],
-        "entities": [[0, 4], [7,10]]
-    },
-    {
-        "prompt": "a giraffe and an elephant",
-        "phrases": ["giraffe", "elephant"],
-        "bboxes": [ [0.328125,0.25,0.984375,0.984375], [0.34375,0.890625,0.640625,0.984375] ],
-        "entities": [[0, 2], [3,5]]
+        "prompt": "An elephant is standing next to a dog",
+        "phrases": [
+            "elephant",
+            "dog"
+        ],
+        "entities": [
+            [
+                0,
+                1
+            ],
+            [
+                6,
+                7
+            ]
+        ]
     }
 ]
