@@ -32,7 +32,7 @@ class HungarianMatcherClass(nn.Module):
         assert cost_bbox != 0 or cost_giou != 0, "all costs cant be 0"
 
     @torch.no_grad()
-    def forward(self, outputs, targets, input_out_prob=None):
+    def forward(self, outputs, targets):
         """ Performs the matching
 
         Params:

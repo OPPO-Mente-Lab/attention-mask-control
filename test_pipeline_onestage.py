@@ -534,7 +534,6 @@ if __name__ == "__main__":
     boxnet_path = args.boxnet_model_path
     save_path = args.output_dir
     os.makedirs(save_path, exist_ok=True)
-    mask_self=True
     amc_test = StableDiffusionTest(model_path, device, args, boxnet_path=boxnet_path)
     generator = torch.Generator(device=device).manual_seed(args.seed)
 
@@ -543,23 +542,13 @@ if __name__ == "__main__":
         cur_input['bboxes'] = None
         cur_path = os.path.join(save_path, "{}".format(i))
         os.makedirs(cur_path, exist_ok=True)
-        # controller = AttentionStore()
-        # images, all_step_bboxes, attn_img = amc_test.log_imgs(
-        #     device, cur_input, num_images_per_prompt=1, generator=generator, controller=controller, mask_control=False, mask_self=mask_self,
-        #     mask_mode=args.mask_mode, soft_mask_rate=args.soft_mask_rate, focus_rate=args.focus_rate)
 
-        # images[0].save(os.path.join(cur_path, f"result.jpg"))
-        # for k, bboxes in enumerate(all_step_bboxes):
-        #     save_bbox_img(cur_path, bboxes, name=f"bbox_{k}.png")
-        #     # print(bboxes)
-        # attn_img.save(os.path.join(cur_path, f"attn.jpg"))
         controller = AttentionStore()
         images, all_step_bboxes, attn_img = amc_test.log_imgs(
-            device, cur_input, num_images_per_prompt=1, generator=generator, controller=controller, mask_control=True, mask_self=mask_self,
+            device, cur_input, num_images_per_prompt=1, generator=generator, controller=controller, mask_control=True, mask_self=True,
             mask_mode=args.mask_mode, soft_mask_rate=args.soft_mask_rate, focus_rate=args.focus_rate)
 
         images[0].save(os.path.join(cur_path, f"masked_result.jpg"))
         for k, bboxes in enumerate(all_step_bboxes):
             save_bbox_img(cur_path, bboxes, name=f"masked_bbox_{k}.png")
-            # print(bboxes)
         attn_img.save(os.path.join(cur_path, f"masked_attn.jpg"))

@@ -1,8 +1,12 @@
 #!/bin/bash
+# Usage: 
+# sh train_boxnet.sh $NODE_NUM $CURRENT_NODE_RANK $GPUS_PER_NODE
+# For example: to train in one machine with 8 GPUs, use:
+# sh train_boxnet.sh 1 0 8
 
-ROOT_DIR=****
+ROOT_DIR=../results
 
-MODEL_NAME=stablediffusion_bbox_v5
+MODEL_NAME=stablediffusion_bbox
 
 MODEL_ROOT_DIR=$ROOT_DIR/${MODEL_NAME}
 if [ ! -d ${MODEL_ROOT_DIR} ];then
@@ -16,7 +20,7 @@ MICRO_BATCH_SIZE=6
 
 CONFIG_JSON="$MODEL_ROOT_DIR/${MODEL_NAME}.ds_config.json"
 ZERO_STAGE=1
-# Deepspeed figures out GAS dynamically from dynamic GBS via set_train_batch_size()
+
 cat <<EOT > $CONFIG_JSON
 {
     "zero_optimization": {
@@ -29,7 +33,7 @@ export PL_DEEPSPEED_CONFIG_PATH=$CONFIG_JSON
 
 DATA_ARGS="\
         --webdataset_base_urls \
-        ****.tar \
+        ***/{*****..*****}.tar \
         --num_workers 2 \
         --batch_size $MICRO_BATCH_SIZE \
         --shard_width 5 \
@@ -42,11 +46,10 @@ DATA_ARGS="\
         --test_repeat 1 \
         --no_class \
         --set_cost_class 100 \
-        --keep_rate 1.0 \
         "
 
 MODEL_ARGS="\
-        --model_path ****/stable-diffusion \
+        --model_path ***/stable-diffusion-v1-5 \
         --learning_rate 1e-4 \
         --weight_decay 1e-4 \
         --warmup_steps 5000 \
@@ -54,6 +57,7 @@ MODEL_ARGS="\
         --min_learning_rate 1e-7 \
         --lr_decay_steps 50000 \
         --timestep_range 0 1000 \
+        --scheduler_type cosine_with_restarts \
         "
 
 MODEL_CHECKPOINT_ARGS="\
@@ -63,6 +67,7 @@ MODEL_CHECKPOINT_ARGS="\
         --save_steps 3000 \
         "
 
+## --strategy deepspeed_stage_${ZERO_STAGE} \
 TRAINER_ARGS="\
         --max_epoch 10 \
         --accelerator gpu \
@@ -86,8 +91,8 @@ export options=" \
 
 python -m torch.distributed.run \
     --nnodes $NNODES \
-    --master_addr **** \
-    --master_port **** \
+    --master_addr *** \
+    --master_port *** \
     --node_rank $2 \
     --nproc_per_node $GPUS_PER_NODE \
     train_boxnet.py $options

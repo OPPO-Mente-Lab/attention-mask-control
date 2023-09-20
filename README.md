@@ -29,7 +29,7 @@ Before training, you need to change configs in `train_boxnet.sh`
 
 You can train the BoxNet through this script:
 ```shell
-sh train_boxnet.sh
+sh train_boxnet.sh $NODE_NUM $CURRENT_NODE_RANK $GPUS_PER_NODE
 ```
 # Text-to-Image Synthesis
 With a trained BoxNet, you can start the Text-to-Image Synthesis with:
