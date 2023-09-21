@@ -1,5 +1,5 @@
 ### Code for paper: "Compositional Text-to-Image Synthesis with Attention Map Control of Diffusion Models"
-[[Paper](https://arxiv.org/abs/2305.13921)]
+[[Projext Page](https://oppo-mente-lab.github.io/compositional_t2i/)][[Paper](https://arxiv.org/abs/2305.13921)]
 
 # Requirements
 A suitable [conda](https://conda.io/) environment named `AMC` can be created
